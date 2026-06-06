@@ -1,0 +1,67 @@
+"""统一超参复现（对照 per-brand 差异化策略）。所有 brand 使用相同超参，仅 task 列布局不同。
+超参来源: model_params_battery_brandall.json
+用法: python repro/repro_unified.py brand1 --fold 0"""
+import os, sys, argparse, numpy as np, torch, torch.nn as nn
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'code', 'DyAD'))
+sys.path.insert(0, os.path.dirname(__file__))
+from model.dynamic_vae import DynamicVAE
+import brands as B
+
+# brandall.json 的统一超参
+UNIFIED = dict(epochs=3, batch=128, lr=0.001, cosine_factor=1.0, hidden=64, latent=32,
+               num_layers=1, bidir=True, noise=0.01, nll_w=10, label_w=0.01, anneal0=0.1, x0=500)
+
+class Norm:
+    def __init__(self, dfs):
+        res = np.asarray(dfs); self.mean = res.mean(1).mean(0); self.std = res.std(1).mean(0)
+        self.max_norm, self.min_norm = res.max(1).max(0), res.min(1).min(0)
+    def __call__(self, df):
+        d = np.maximum(np.maximum(1e-4, self.std), 0.1*(self.max_norm-self.min_norm)); return (df-self.mean)/d
+
+def run(brand, fold, outdir):
+    torch.set_num_threads(int(os.environ.get('TORCH_THREADS', '32')))
+    dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu'); torch.manual_seed(0); np.random.seed(0)
+    hp = UNIFIED
+    c = np.load(f'repro/cache/{brand}.npz', allow_pickle=True)
+    X, car, lab, mil, cols = c['X'], c['car'], c['lab'], c['mil'], list(c['cols'])
+    ENC, DEC, TGT = B.col_indices(brand, cols)
+    sp = np.load(f'repro/cache/{brand}_split.npy', allow_pickle=True).item()
+    ind, ood = sp['ind_sorted'], sp['ood_sorted']; n = len(ind)
+    test_ind = ind[int(fold*n/5):int((fold+1)*n/5)]
+    train_cars = set(ind[:int(fold*n/5)] + ind[int((fold+1)*n/5):]); test_cars = set(test_ind) | set(ood)
+    tr = np.isin(car, list(train_cars)); te = np.isin(car, list(test_cars))
+    Xtr, miltr = X[tr], mil[tr]; Xte, carte, labte = X[te], car[te], lab[te]
+    print(f"[unified {brand} f{fold}] train={tr.sum()}({len(train_cars)}车) test={te.sum()}({len(test_cars)}车,{len(ood)}故障) hp={hp['hidden']}h/{hp['latent']}z noise={hp['noise']}")
+    nrm = Norm(Xtr[:200]); Xtr_n = nrm(Xtr).astype(np.float32); Xte_n = nrm(Xte).astype(np.float32)
+    mmin, mmax = miltr[:50].min(), miltr[:50].max(); miltr_n = ((miltr-mmin)/max(1e-6, mmax-mmin)).astype(np.float32)
+    model = DynamicVAE(rnn_type='gru', hidden_size=hp['hidden'], latent_size=hp['latent'],
+                       encoder_embedding_size=len(ENC), output_embedding_size=len(TGT),
+                       decoder_embedding_size=len(DEC), num_layers=hp['num_layers'], bidirectional=hp['bidir']).float().to(dev)
+    opt = torch.optim.AdamW(model.parameters(), lr=hp['lr'], weight_decay=1e-6)
+    sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=hp['epochs'], eta_min=hp['cosine_factor']*hp['lr'])
+    smooth, mse = nn.SmoothL1Loss(), nn.MSELoss()
+    ef = lambda x: x[:, :, ENC]; df = lambda x: x[:, :, DEC]; tf = lambda x: x[:, :, TGT]
+    Xtr_t = torch.from_numpy(Xtr_n); mil_t = torch.from_numpy(miltr_n); Ntr = len(Xtr_t); step = 0
+    for ep in range(hp['epochs']):
+        model.train(); perm = torch.randperm(Ntr); tot = 0.0
+        for s in range(0, Ntr, hp['batch']):
+            idx = perm[s:s+hp['batch']]; xb = Xtr_t[idx].to(dev); mb = mil_t[idx].to(dev)
+            log_p, mean, log_v, z, mp = model(xb, ef, df, None, hp['noise']); target = tf(xb)
+            nll = smooth(log_p, target); kl = -0.5*torch.sum(1+log_v-mean.pow(2)-log_v.exp())
+            klw = hp['anneal0']*min(1.0, step/hp['x0']); lbl = mse(mp.squeeze(), mb)
+            loss = hp['nll_w']*nll + hp['label_w']*lbl + klw*kl/xb.shape[0]
+            opt.zero_grad(); loss.backward(); opt.step(); tot += loss.item(); step += 1
+        sch.step(); print(f"  ep{ep+1}/{hp['epochs']} loss={tot/max(1,Ntr//hp['batch']):.4f}")
+    model.eval(); Xte_t = torch.from_numpy(Xte_n); errs = np.zeros(len(Xte_t), np.float32)
+    with torch.no_grad():
+        for s in range(0, len(Xte_t), 256):
+            xb = Xte_t[s:s+256].to(dev); log_p, *_ = model(xb, ef, df, None, hp['noise'])
+            errs[s:s+len(xb)] = ((log_p-tf(xb))**2).mean(dim=(1,2)).cpu().numpy()
+    os.makedirs(outdir, exist_ok=True); import pandas as pd
+    pd.DataFrame({'car': carte, 'label': labte, 'rec_error': errs}).to_csv(f'{outdir}/seg_fold{fold}.csv', index=False)
+    print(f"[unified {brand} f{fold}] saved {outdir}/seg_fold{fold}.csv")
+
+if __name__ == '__main__':
+    ap = argparse.ArgumentParser(); ap.add_argument('brand'); ap.add_argument('--fold', type=int, default=0)
+    ap.add_argument('--outdir', default='')
+    a = ap.parse_args(); run(a.brand, a.fold, a.outdir or f'repro/out/{a.brand}_unified')

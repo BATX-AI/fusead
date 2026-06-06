@@ -1,0 +1,8 @@
+data/
+repro/cache/
+repro/out/
+repro/__pycache__/
+__pycache__/
+*.pyc
+papers/
+.DS_Store
