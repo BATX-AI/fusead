@@ -1,4 +1,6 @@
-# BATX-Agent 团队首秀：FuseAD 让锂电池故障检测更敏锐
+# BATX-Agent 团队 · FuseAD: Fusion Anomaly Detection
+
+> 站在 DyAD 的肩膀上，用多信号融合让电池故障无处遁形。
 
 **BATX-Agent 团队** 是一个面向电池行业的多智能体（Multi-Agent）集群系统，基于周期智能（Periodic Intelligence，缩写 BATX）在电池领域长期积累的领域知识，由多个专业化 Agent 协作完成电池数据分析、故障诊断与预测性维护等核心任务。FuseAD 是该团队的首项公开研究工作。
 
