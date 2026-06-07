@@ -12,35 +12,9 @@
 
 ### 1.1 Base Architecture (DyAD)
 
-The DyAD framework uses a GRU-based variational autoencoder (VAE) for dynamical system anomaly detection:
+The DyAD framework uses a GRU-based variational autoencoder (VAE) for dynamical system anomaly detection. Our FuseAD adds multi-signal fusion on top (see diagram below).
 
-```
-┌─────────────────────────────────────────────────────┐
-│                    DyAD / FuseAD                      │
-│                                                       │
-│   Charging Segment x₁...x_T                           │
-│        │                                              │
-│        ▼                                              │
-│   ┌──────────────────────┐                            │
-│   │   GRU Encoder        │  ◄── all channels          │
-│   │   (multi-layer bi-GRU)│       (SOC, I, V, T...)    │
-│   └────────┬─────────────┘                            │
-│            │                                          │
-│     ┌──────┴──────┐                                   │
-│     │  μ     log σ²│  ◄── latent space z ~ N(μ,σ²)    │
-│     └──────┬──────┘                                   │
-│            │                                          │
-│            ▼                                          │
-│   ┌──────────────────────┐                            │
-│   │   GRU Decoder        │  ◄── system inputs only    │
-│   │   (multi-layer bi-GRU)│       (SOC, I) + z          │
-│   └────────┬─────────────┘                            │
-│            │                                          │
-│            ▼                                          │
-│   System Response Prediction                          │
-│   (V, T → rec_error vs ground truth)                  │
-└─────────────────────────────────────────────────────┘
-```
+![FuseAD Architecture](figures/fig2_pipeline.png)
 
 **Training objective:**
 ```
@@ -67,23 +41,7 @@ Final anomaly score (z-score normalized and summed):
 s_fuse(x) = (e − ē_tr)/σ_e  +  (m − m̄_tr)/σ_m  +  (g − ḡ_tr)/σ_g
 ```
 
-```
-Training Data (Normal only)
-        │
-        ▼
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│  Rec Error    │     │  Latent z    │     │  Latent z    │
-│  e = ‖ŷ−y‖²  │     │  μ_z, Σ_z    │     │  GMM (BIC k) │
-└──────┬───────┘     └──────┬───────┘     └──────┬───────┘
-       │                    │                     │
-       ▼                    ▼                     ▼
-  z-score(e)         Mahalanobis(z)        −log P_GMM(z)
-       │                    │                     │
-       └────────────────────┼─────────────────────┘
-                            │
-                            ▼
-                   s_fuse(x) = Σ z-scores
-```
+![FuseAD Fusion Flow](figures/fig2_pipeline.png)
 
 #### Innovation 2: Noise-Aware Training & "Optimal Immaturity"
 
@@ -92,27 +50,7 @@ We find that the VAE noise scale parameter is critical for anomaly detection:
 - **noise=1.0 (standard VAE):** Stochastic sampling injects randomness → rec_error stays sensitive → better detection
 - **noise=0.01 (near-deterministic AE):** VAE learns to suppress noise → rec_error collapses 5-10× → detection fails
 
-We identify an **"optimal immaturity point"** — stopping training at 3-5 epochs before the VAE learns to fully suppress stochastic noise. This counter-intuitive finding means: *less training = better anomaly detection*.
-
-```
-Detection Performance vs Epochs
-                                    
-  AUROC │                              
-  0.90  ┤          ●                  
-        │         / \                 
-  0.87  ┤        /   \                
-        │       /     \               
-  0.84  ┤      /       \              
-        │     /         \             
-  0.81  ┤    ●           \            
-        │                 ●           
-  0.78  ┤                             
-        │                             
-        ├────┬────┬────┬────┬────►    
-        3    5    8   12   15   Epochs
-             ↑                       
-        optimal immaturity           
-```
+We identify an **"optimal immaturity point"** — stopping training at 3-5 epochs before the VAE learns to fully suppress stochastic noise. This counter-intuitive finding means: *less training = better anomaly detection*. See [Figure 4](#34-noise-parameter-sensitivity) for empirical evidence with noise scale sweep experiments.
 
 #### Innovation 3: Soft Top-p% Aggregation
 
@@ -166,27 +104,11 @@ Three battery brands from the original DyAD paper, with distinct data characteri
 
 FuseAD improves over DyAD by **+4.75 points** (3-dataset avg) and over the unified-config approach by **+12.48 points**.
 
+![Main Comparison](figures/fig1_main_comparison.png)
+
 ### 3.2 Per-Fold Breakdown
 
-```
-Dataset A (brand1)                     Dataset B (brand2)                     Dataset C (brand3)
-                                                                              
-   DyAD ■  FuseAD ■                      DyAD ■  FuseAD ■                      DyAD ■  FuseAD ■
-                                                                              
-0.95 ┤                               0.95 ┤              ■                 0.95 ┤                        ■
-     │        ■                            │         ■ ■                        │                    ■■  
-0.90 ┤  ■  ■  │  ■                    0.90 ┤  ■  ■  │■■ ■                  0.90 ┤              ■■■■■■│■ ■
-     │  │  │  │  │                        │  │  │  ││ │■                      │  ■     ■■      │ │ │││ │
-0.85 ┤  │  │  │  │■■                  0.85 ┤  │  │  ││ │■ ■                0.85 ┤  │     ││  ■■  │ │ │││ │
-     │  │  │  │■ ││■                      │  │  │■ ││ ││ │                     │  │     ││  ││  │ │ │││ │
-0.80 ┤  │■ │  │■ │││                      │  │ ■││ ││ ││ │                     │  │  ■  ││  ││  │ │ │││ │
-     │  ││■│  ││ │││                      │  │ │││■││ ││ │                     │  │  │  ││  ││  │ │ │││ │
-0.75 ┤  ││││  ││ │││                      │  │ │││││ ││ ■                     │  │  │  ││  ││  │ │ │││ │
-     │  ││││  ││ │││                      │  │ │││││ ││ │                 0.75 ┤  │  │  ││  ││  │ │ │││ │
-0.70 ┤  ││││  ││ │││                      │  │ │││││ ││ │                     │  │  │  ││  ││  │ │ │││ │
-     └──┴─┴─┴──┴─┴─┴─                    └──┴─┴─┴─┴─┴─┴─                    └──┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─
-     f0 f1 f2 f3 f4                        f0 f1 f2 f3 f4                        f0 f1 f2 f3 f4
-```
+![Per-Fold Comparison](figures/fig5_perfold.png)
 
 ### 3.3 Ablation Study
 
@@ -203,40 +125,24 @@ Key observations:
 - **Soft top-p%** benefits Dataset A (+2.69) where VAE noise is high (noise=1.0)
 - **Multi-signal fusion** helps most where rec_error alone is insufficient
 
+![Ablation Study](figures/fig3_ablation.png)
+
 ### 3.4 Noise Parameter Sensitivity
 
-```
- Dataset A                             Dataset B
-                                    
-  AUROC │                             AUROC │
-  0.90  ┤   ●                        0.91  ┤         ●
-        │                            0.88  ┤        / \
-  0.87  ┤    \                               │       /   \
-        │     \                        0.85  ┤      /     \
-  0.84  ┤      \                              │     /       \
-        │       \                       0.82  ┤    ●         \
-  0.81  ┤        \                             │                 \
-        │         ●                      0.79  ┤                  ●
-  0.78  ┤                                       ┤                   ●
-        ├───┬───┬───┬───►                      ├───┬────┬────┬────►
-       0.01 0.1 0.5 1.0  Noise              0.01 0.1  0.5  1.0  Noise
-```
+![Noise Sensitivity](figures/fig4_noise.png)
 
 Different datasets require fundamentally different VAE stochasticity levels. Dataset A needs standard VAE randomness (noise=1.0), while Dataset B peaks at mild stochasticity (noise=0.1).
 
 ### 3.5 Signal Complementarity
 
-```
- Dataset A: AUROC by signal type
-                                    
-  Rec Error    ──●────●────●────────► 0.8681
-               │    │                 
-  Mahalanobis  ──●────●────●────────► 0.8765
-                    │    │            
-  GMM Density  ────●────●────●──────► 0.8692
-                         │            
-  FuseAD(all 3) ─────────●──────────► 0.8961
-```
+The three anomaly signals capture different aspects of abnormal behavior:
+
+| Signal | AUROC (Dataset A) | What it detects |
+|--------|------------------|-----------------|
+| Rec Error (MSE) | 0.8681 | Response prediction deviation |
+| Mahalanobis (LW) | 0.8765 | Latent distribution shift |
+| GMM Density | 0.8692 | Multi-modal density outliers |
+| **FuseAD (all 3)** | **0.8961** | Combined complementary information |
 
 The three signals capture different aspects of anomaly: rec_error detects response deviations, Mahalanobis detects distributional shifts, and GMM detects multi-modal density outliers. Their fusion consistently outperforms any single signal.
 
